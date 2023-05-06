@@ -15,13 +15,18 @@ pub struct BytePacketBuffer {
     pub position: usize,
 }
 
-#[allow(clippy::new_without_default)]
-impl BytePacketBuffer {
-    pub fn new() -> Self {
-        BytePacketBuffer {
+impl Default for BytePacketBuffer {
+    fn default() -> Self {
+        Self {
             buffer: [0; 512],
             position: 0,
         }
+    }
+}
+
+impl BytePacketBuffer {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn step(&mut self, steps: usize) -> anyhow::Result<()> {
@@ -169,10 +174,9 @@ pub struct DnsHeader {
     pub resource_entries: u16,
 }
 
-#[allow(clippy::new_without_default)]
-impl DnsHeader {
-    pub fn new() -> Self {
-        DnsHeader {
+impl Default for DnsHeader {
+    fn default() -> Self {
+        Self {
             id: 0,
             recursion_desired: false,
             truncated_message: false,
@@ -189,6 +193,12 @@ impl DnsHeader {
             authoritative_entries: 0,
             resource_entries: 0,
         }
+    }
+}
+
+impl DnsHeader {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn read(&mut self, buf: &mut BytePacketBuffer) -> anyhow::Result<()> {
@@ -317,16 +327,21 @@ pub struct DnsPacket {
     pub resources: Vec<DnsRecord>,
 }
 
-#[allow(clippy::new_without_default)]
-impl DnsPacket {
-    pub fn new() -> Self {
-        DnsPacket {
+impl Default for DnsPacket {
+    fn default() -> Self {
+        Self {
             header: DnsHeader::new(),
             questions: Vec::new(),
             answers: Vec::new(),
             authorities: Vec::new(),
             resources: Vec::new(),
         }
+    }
+}
+
+impl DnsPacket {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn from_buffer(buffer: &mut BytePacketBuffer) -> anyhow::Result<DnsPacket> {
