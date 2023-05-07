@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -179,6 +179,17 @@ impl BytePacketBuffer {
         self.write_u8(0)?;
         Ok(())
     }
+
+    fn set(&mut self, position: usize, value: u8) -> anyhow::Result<()> {
+        self.buffer[position] = value;
+        Ok(())
+    }
+
+    fn set_u16(&mut self, position: usize, value: u16) -> anyhow::Result<()> {
+        self.set(position, (value >> 8) as u8)?;
+        self.set(position + 1, (value & 0xFF) as u8)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,14 +314,22 @@ impl DnsHeader {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryType {
-    Unknown(u16),
     A,
+    Ns,
+    Cname,
+    Mx,
+    Aaaa,
+    Unknown(u16),
 }
 
 impl From<u16> for QueryType {
     fn from(num: u16) -> Self {
         match num {
             1 => QueryType::A,
+            2 => QueryType::Ns,
+            5 => QueryType::Cname,
+            15 => QueryType::Mx,
+            28 => QueryType::Aaaa,
             _ => QueryType::Unknown(num),
         }
     }
@@ -319,8 +338,12 @@ impl From<u16> for QueryType {
 impl From<QueryType> for u16 {
     fn from(qtype: QueryType) -> Self {
         match qtype {
-            QueryType::Unknown(num) => num,
             QueryType::A => 1,
+            QueryType::Ns => 2,
+            QueryType::Cname => 5,
+            QueryType::Mx => 15,
+            QueryType::Aaaa => 28,
+            QueryType::Unknown(num) => num,
         }
     }
 }
@@ -357,15 +380,36 @@ impl DnsQuestion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsRecord {
+    A {
+        domain: String,
+        addr: Ipv4Addr,
+        ttl: u32,
+    },
+    Ns {
+        domain: String,
+        host: String,
+        ttl: u32,
+    },
+    Cname {
+        domain: String,
+        host: String,
+        ttl: u32,
+    },
+    Mx {
+        domain: String,
+        priority: u16,
+        host: String,
+        ttl: u32,
+    },
+    Aaaa {
+        domain: String,
+        addr: Ipv6Addr,
+        ttl: u32,
+    },
     Unknown {
         domain: String,
         qtype: u16,
         data_len: u16,
-        ttl: u32,
-    },
-    A {
-        domain: String,
-        addr: Ipv4Addr,
         ttl: u32,
     },
 }
@@ -395,6 +439,56 @@ impl DnsRecord {
                     ),
                     ttl,
                 })
+            }
+            QueryType::Ns => {
+                let mut ns = String::new();
+                buffer.read_qname(&mut ns)?;
+
+                Ok(DnsRecord::Ns {
+                    domain,
+                    host: ns,
+                    ttl,
+                })
+            }
+            QueryType::Cname => {
+                let mut cname = String::new();
+                buffer.read_qname(&mut cname)?;
+
+                Ok(DnsRecord::Cname {
+                    domain,
+                    host: cname,
+                    ttl,
+                })
+            }
+            QueryType::Mx => {
+                let priority = buffer.read_u16()?;
+                let mut mx = String::new();
+                buffer.read_qname(&mut mx)?;
+
+                Ok(DnsRecord::Mx {
+                    domain,
+                    priority,
+                    host: mx,
+                    ttl,
+                })
+            }
+            QueryType::Aaaa => {
+                let raw_addr1 = buffer.read_u32()?;
+                let raw_addr2 = buffer.read_u32()?;
+                let raw_addr3 = buffer.read_u32()?;
+                let raw_addr4 = buffer.read_u32()?;
+                let addr = Ipv6Addr::new(
+                    ((raw_addr1 >> 16) & 0xFFFF) as u16,
+                    (raw_addr1 & 0xFFFF) as u16,
+                    ((raw_addr2 >> 16) & 0xFFFF) as u16,
+                    (raw_addr2 & 0xFFFF) as u16,
+                    ((raw_addr3 >> 16) & 0xFFFF) as u16,
+                    (raw_addr3 & 0xFFFF) as u16,
+                    ((raw_addr4 >> 16) & 0xFFFF) as u16,
+                    (raw_addr4 & 0xFFFF) as u16,
+                );
+
+                Ok(DnsRecord::Aaaa { domain, addr, ttl })
             }
             QueryType::Unknown(_) => {
                 buffer.step(data_len as usize)?;
@@ -429,6 +523,74 @@ impl DnsRecord {
                 buffer.write_u8(octets[1])?;
                 buffer.write_u8(octets[2])?;
                 buffer.write_u8(octets[3])?;
+            }
+            DnsRecord::Ns {
+                ref domain,
+                ref host,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::Ns.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+
+                let position = buffer.position;
+                buffer.write_u16(0)?;
+                buffer.write_qname(host)?;
+
+                let size = buffer.position - (position + 2);
+                buffer.set_u16(position, size as u16)?;
+            }
+            DnsRecord::Cname {
+                ref domain,
+                ref host,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::Cname.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+
+                let position = buffer.position;
+                buffer.write_u16(0)?;
+                buffer.write_qname(host)?;
+
+                let size = buffer.position - (position + 2);
+                buffer.set_u16(position, size as u16)?;
+            }
+            DnsRecord::Mx {
+                ref domain,
+                priority,
+                ref host,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::Mx.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+
+                let position = buffer.position;
+                buffer.write_u16(0)?;
+                buffer.write_u16(priority)?;
+                buffer.write_qname(host)?;
+
+                let size = buffer.position - (position + 2);
+                buffer.set_u16(position, size as u16)?;
+            }
+            DnsRecord::Aaaa {
+                ref domain,
+                ref addr,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::Aaaa.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+                buffer.write_u16(16)?;
+
+                for segment in &addr.segments() {
+                    buffer.write_u16(*segment)?;
+                }
             }
             DnsRecord::Unknown { .. } => {
                 println!("Skipping record: {:?}", self)
