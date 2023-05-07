@@ -7,18 +7,22 @@ enum BytePacketBufferError {
     EndOfBuffer,
     #[error("Limit of {0} jumps exceeded")]
     LimitOfJumpsExceeded(usize),
+    #[error("Single label exceeds 63 characters of length")]
+    SingleLabelExceedsCharactersOfLength,
 }
+
+const MAX_BUFFER_SIZE: usize = 512;
 
 #[derive(Debug)]
 pub struct BytePacketBuffer {
-    pub buffer: [u8; 512],
+    pub buffer: [u8; MAX_BUFFER_SIZE],
     pub position: usize,
 }
 
 impl Default for BytePacketBuffer {
     fn default() -> Self {
         Self {
-            buffer: [0; 512],
+            buffer: [0; MAX_BUFFER_SIZE],
             position: 0,
         }
     }
@@ -40,7 +44,7 @@ impl BytePacketBuffer {
     }
 
     fn read(&mut self) -> anyhow::Result<u8> {
-        if self.position >= 512 {
+        if self.position >= MAX_BUFFER_SIZE {
             return Err(BytePacketBufferError::EndOfBuffer.into());
         }
 
@@ -50,7 +54,7 @@ impl BytePacketBuffer {
     }
 
     fn get(&mut self, position: usize) -> anyhow::Result<u8> {
-        if position >= 512 {
+        if position >= MAX_BUFFER_SIZE {
             return Err(BytePacketBufferError::EndOfBuffer.into());
         }
 
@@ -58,7 +62,7 @@ impl BytePacketBuffer {
     }
 
     fn get_range(&mut self, start: usize, len: usize) -> anyhow::Result<&[u8]> {
-        if start + len >= 512 {
+        if start + len >= MAX_BUFFER_SIZE {
             return Err(BytePacketBufferError::EndOfBuffer.into());
         }
 
@@ -119,7 +123,6 @@ impl BytePacketBuffer {
                 );
 
                 delim = ".";
-
                 position += len as usize;
             }
         }
@@ -128,6 +131,52 @@ impl BytePacketBuffer {
             self.seek(position)?;
         }
 
+        Ok(())
+    }
+
+    fn write(&mut self, value: u8) -> anyhow::Result<()> {
+        if self.position >= MAX_BUFFER_SIZE {
+            return Err(BytePacketBufferError::EndOfBuffer.into());
+        }
+
+        self.buffer[self.position] = value;
+        self.position += 1;
+        Ok(())
+    }
+
+    fn write_u8(&mut self, value: u8) -> anyhow::Result<()> {
+        self.write(value)?;
+        Ok(())
+    }
+
+    fn write_u16(&mut self, value: u16) -> anyhow::Result<()> {
+        self.write((value >> 8) as u8)?;
+        self.write((value & 0xFF) as u8)?;
+        Ok(())
+    }
+
+    fn write_u32(&mut self, value: u32) -> anyhow::Result<()> {
+        self.write(((value >> 24) & 0xFF) as u8)?;
+        self.write(((value >> 16) & 0xFF) as u8)?;
+        self.write(((value >> 8) & 0xFF) as u8)?;
+        self.write((value & 0xFF) as u8)?;
+        Ok(())
+    }
+
+    fn write_qname(&mut self, qname: &str) -> anyhow::Result<()> {
+        for label in qname.split('.') {
+            let len = label.len();
+            if len > 0x3f {
+                return Err(BytePacketBufferError::SingleLabelExceedsCharactersOfLength.into());
+            }
+
+            self.write_u8(len as u8)?;
+            for b in label.as_bytes() {
+                self.write_u8(*b)?;
+            }
+        }
+
+        self.write_u8(0)?;
         Ok(())
     }
 }
@@ -197,14 +246,14 @@ impl Default for DnsHeader {
 }
 
 impl DnsHeader {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
-    pub fn read(&mut self, buf: &mut BytePacketBuffer) -> anyhow::Result<()> {
-        self.id = buf.read_u16()?;
+    fn read(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+        self.id = buffer.read_u16()?;
 
-        let flags = buf.read_u16()?;
+        let flags = buffer.read_u16()?;
         let a = (flags >> 8) as u8;
         let b = (flags & 0xFF) as u8;
 
@@ -219,10 +268,34 @@ impl DnsHeader {
         self.z = (b & (1 << 6)) > 0;
         self.recursion_available = (b & (1 << 7)) > 0;
 
-        self.questions = buf.read_u16()?;
-        self.answers = buf.read_u16()?;
-        self.authoritative_entries = buf.read_u16()?;
-        self.resource_entries = buf.read_u16()?;
+        self.questions = buffer.read_u16()?;
+        self.answers = buffer.read_u16()?;
+        self.authoritative_entries = buffer.read_u16()?;
+        self.resource_entries = buffer.read_u16()?;
+
+        Ok(())
+    }
+
+    fn write(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+        buffer.write_u16(self.id)?;
+        buffer.write_u8(
+            (self.recursion_desired as u8)
+                | ((self.truncated_message as u8) << 1)
+                | ((self.authoritative_answer as u8) << 2)
+                | (self.opcode << 3)
+                | ((self.response as u8) << 7),
+        )?;
+        buffer.write_u8(
+            (self.rescode as u8)
+                | ((self.checking_disabled as u8) << 4)
+                | ((self.authentic_data as u8) << 5)
+                | ((self.z as u8) << 6)
+                | ((self.recursion_available as u8) << 7),
+        )?;
+        buffer.write_u16(self.questions)?;
+        buffer.write_u16(self.answers)?;
+        buffer.write_u16(self.authoritative_entries)?;
+        buffer.write_u16(self.resource_entries)?;
 
         Ok(())
     }
@@ -243,6 +316,15 @@ impl From<u16> for QueryType {
     }
 }
 
+impl From<QueryType> for u16 {
+    fn from(qtype: QueryType) -> Self {
+        match qtype {
+            QueryType::Unknown(num) => num,
+            QueryType::A => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsQuestion {
     pub name: String,
@@ -254,10 +336,20 @@ impl DnsQuestion {
         DnsQuestion { name, qtype }
     }
 
-    pub fn read(&mut self, buf: &mut BytePacketBuffer) -> anyhow::Result<()> {
-        buf.read_qname(&mut self.name)?;
-        self.qtype = QueryType::from(buf.read_u16()?);
-        let _ = buf.read_u16()?;
+    fn read(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+        buffer.read_qname(&mut self.name)?;
+        self.qtype = QueryType::from(buffer.read_u16()?);
+        let _ = buffer.read_u16()?;
+
+        Ok(())
+    }
+
+    fn write(&self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+        buffer.write_qname(&self.name)?;
+
+        let type_num = self.qtype.into();
+        buffer.write_u16(type_num)?;
+        buffer.write_u16(1)?;
 
         Ok(())
     }
@@ -279,12 +371,12 @@ pub enum DnsRecord {
 }
 
 impl DnsRecord {
-    pub fn read(buffer: &mut BytePacketBuffer) -> anyhow::Result<DnsRecord> {
+    fn read(buffer: &mut BytePacketBuffer) -> anyhow::Result<DnsRecord> {
         let mut domain = String::new();
         buffer.read_qname(&mut domain)?;
 
         let qtype_num = buffer.read_u16()?;
-        let qtype = QueryType::from(qtype_num);
+        let qtype = qtype_num.into();
         let _ = buffer.read_u16()?;
         let ttl = buffer.read_u32()?;
         let data_len = buffer.read_u16()?;
@@ -315,6 +407,35 @@ impl DnsRecord {
                 })
             }
         }
+    }
+
+    fn write(&self, buffer: &mut BytePacketBuffer) -> anyhow::Result<usize> {
+        let start = buffer.position;
+
+        match *self {
+            DnsRecord::A {
+                ref domain,
+                ref addr,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::A.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+                buffer.write_u16(4)?;
+
+                let octets = addr.octets();
+                buffer.write_u8(octets[0])?;
+                buffer.write_u8(octets[1])?;
+                buffer.write_u8(octets[2])?;
+                buffer.write_u8(octets[3])?;
+            }
+            DnsRecord::Unknown { .. } => {
+                println!("Skipping record: {:?}", self)
+            }
+        }
+
+        Ok(buffer.position - start)
     }
 }
 
@@ -367,5 +488,32 @@ impl DnsPacket {
         }
 
         Ok(result)
+    }
+
+    pub fn write(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+        self.header.questions = self.questions.len() as u16;
+        self.header.answers = self.answers.len() as u16;
+        self.header.authoritative_entries = self.authorities.len() as u16;
+        self.header.resource_entries = self.resources.len() as u16;
+
+        self.header.write(buffer)?;
+
+        for question in &self.questions {
+            question.write(buffer)?;
+        }
+
+        for record in &self.answers {
+            record.write(buffer)?;
+        }
+
+        for record in &self.authorities {
+            record.write(buffer)?;
+        }
+
+        for record in &self.resources {
+            record.write(buffer)?;
+        }
+
+        Ok(())
     }
 }
