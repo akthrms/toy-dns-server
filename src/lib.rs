@@ -61,7 +61,7 @@ impl BytePacketBuffer {
         Ok(self.buffer[position])
     }
 
-    fn get_range(&mut self, start: usize, len: usize) -> anyhow::Result<&[u8]> {
+    pub fn get_range(&mut self, start: usize, len: usize) -> anyhow::Result<&[u8]> {
         if start + len >= MAX_BUFFER_SIZE {
             return Err(BytePacketBufferError::EndOfBuffer.into());
         }

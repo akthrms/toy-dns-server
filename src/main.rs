@@ -1,10 +1,17 @@
 use std::net::UdpSocket;
-use toy_dns_server::{BytePacketBuffer, DnsPacket, DnsQuestion, QueryType};
+use toy_dns_server::{BytePacketBuffer, DnsPacket, DnsQuestion, QueryType, ResultCode};
 
 fn main() -> anyhow::Result<()> {
-    let qname = "google.com";
-    let qtype = QueryType::A;
+    let socket = UdpSocket::bind(("0.0.0.0", 2053))?;
 
+    loop {
+        if let Err(e) = handle_query(&socket) {
+            eprintln!("An error occurred: {}", e);
+        }
+    }
+}
+
+fn lookup(qname: &str, qtype: QueryType) -> anyhow::Result<DnsPacket> {
     let server = ("8.8.8.8", 53);
     let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
 
@@ -23,24 +30,52 @@ fn main() -> anyhow::Result<()> {
     let mut res_buffer = BytePacketBuffer::new();
     socket.recv_from(&mut res_buffer.buffer)?;
 
-    let res_packet = DnsPacket::from_buffer(&mut res_buffer)?;
-    println!("{:#?}", res_packet.header);
+    DnsPacket::from_buffer(&mut res_buffer)
+}
 
-    for question in res_packet.questions {
-        println!("{:#?}", question);
+fn handle_query(socket: &UdpSocket) -> anyhow::Result<()> {
+    let mut req_buffer = BytePacketBuffer::new();
+    let (_, src) = socket.recv_from(&mut req_buffer.buffer)?;
+    let mut req_packet = DnsPacket::from_buffer(&mut req_buffer)?;
+
+    let mut res_packet = DnsPacket::new();
+    res_packet.header.id = req_packet.header.id;
+    res_packet.header.recursion_desired = true;
+    res_packet.header.recursion_available = true;
+    res_packet.header.response = true;
+
+    if let Some(question) = req_packet.questions.pop() {
+        println!("Received query: {:?}", question);
+
+        if let Ok(result) = lookup(&question.name, question.qtype) {
+            res_packet.questions.push(question);
+            res_packet.header.rescode = result.header.rescode;
+
+            for record in result.answers {
+                println!("Answer: {:?}", record);
+                res_packet.answers.push(record);
+            }
+
+            for record in result.authorities {
+                println!("Authority: {:?}", record);
+                res_packet.authorities.push(record);
+            }
+
+            for record in result.resources {
+                println!("Resource: {:?}", record);
+                res_packet.resources.push(record);
+            }
+        } else {
+            res_packet.header.rescode = ResultCode::ServFail;
+        }
+    } else {
+        res_packet.header.rescode = ResultCode::FormErr;
     }
 
-    for record in res_packet.answers {
-        println!("{:#?}", record);
-    }
-
-    for record in res_packet.authorities {
-        println!("{:#?}", record);
-    }
-
-    for record in res_packet.resources {
-        println!("{:#?}", record);
-    }
+    let mut res_buffer = BytePacketBuffer::new();
+    res_packet.write(&mut res_buffer)?;
+    let data = res_buffer.get_range(0, res_buffer.position)?;
+    socket.send_to(data, src)?;
 
     Ok(())
 }
