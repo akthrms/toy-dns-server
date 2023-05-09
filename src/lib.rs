@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,9 +14,9 @@ enum BytePacketBufferError {
 const MAX_BUFFER_SIZE: usize = 512;
 
 #[derive(Debug)]
-pub struct BytePacketBuffer {
-    pub buffer: [u8; MAX_BUFFER_SIZE],
-    pub position: usize,
+struct BytePacketBuffer {
+    buffer: [u8; MAX_BUFFER_SIZE],
+    position: usize,
 }
 
 impl Default for BytePacketBuffer {
@@ -29,7 +29,7 @@ impl Default for BytePacketBuffer {
 }
 
 impl BytePacketBuffer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
@@ -61,7 +61,7 @@ impl BytePacketBuffer {
         Ok(self.buffer[position])
     }
 
-    pub fn get_range(&mut self, start: usize, len: usize) -> anyhow::Result<&[u8]> {
+    fn get_range(&mut self, start: usize, len: usize) -> anyhow::Result<&[u8]> {
         if start + len >= MAX_BUFFER_SIZE {
             return Err(BytePacketBufferError::EndOfBuffer.into());
         }
@@ -193,7 +193,7 @@ impl BytePacketBuffer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultCode {
+enum ResultCode {
     NoError,
     FormErr,
     ServFail,
@@ -216,22 +216,22 @@ impl From<u8> for ResultCode {
 }
 
 #[derive(Debug, Clone)]
-pub struct DnsHeader {
-    pub id: u16,
-    pub recursion_desired: bool,
-    pub truncated_message: bool,
-    pub authoritative_answer: bool,
-    pub opcode: u8,
-    pub response: bool,
-    pub rescode: ResultCode,
-    pub checking_disabled: bool,
-    pub authentic_data: bool,
-    pub z: bool,
-    pub recursion_available: bool,
-    pub questions: u16,
-    pub answers: u16,
-    pub authoritative_entries: u16,
-    pub resource_entries: u16,
+struct DnsHeader {
+    id: u16,
+    recursion_desired: bool,
+    truncated_message: bool,
+    authoritative_answer: bool,
+    opcode: u8,
+    response: bool,
+    rescode: ResultCode,
+    checking_disabled: bool,
+    authentic_data: bool,
+    z: bool,
+    recursion_available: bool,
+    questions: u16,
+    answers: u16,
+    authoritative_entries: u16,
+    resource_entries: u16,
 }
 
 impl Default for DnsHeader {
@@ -313,7 +313,7 @@ impl DnsHeader {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryType {
+enum QueryType {
     A,
     Ns,
     Cname,
@@ -349,13 +349,13 @@ impl From<QueryType> for u16 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsQuestion {
-    pub name: String,
-    pub qtype: QueryType,
+struct DnsQuestion {
+    name: String,
+    qtype: QueryType,
 }
 
 impl DnsQuestion {
-    pub fn new(name: String, qtype: QueryType) -> Self {
+    fn new(name: String, qtype: QueryType) -> Self {
         DnsQuestion { name, qtype }
     }
 
@@ -379,7 +379,7 @@ impl DnsQuestion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DnsRecord {
+enum DnsRecord {
     A {
         domain: String,
         addr: Ipv4Addr,
@@ -602,12 +602,12 @@ impl DnsRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct DnsPacket {
-    pub header: DnsHeader,
-    pub questions: Vec<DnsQuestion>,
-    pub answers: Vec<DnsRecord>,
-    pub authorities: Vec<DnsRecord>,
-    pub resources: Vec<DnsRecord>,
+struct DnsPacket {
+    header: DnsHeader,
+    questions: Vec<DnsQuestion>,
+    answers: Vec<DnsRecord>,
+    authorities: Vec<DnsRecord>,
+    resources: Vec<DnsRecord>,
 }
 
 impl Default for DnsPacket {
@@ -623,11 +623,11 @@ impl Default for DnsPacket {
 }
 
 impl DnsPacket {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
-    pub fn from_buffer(buffer: &mut BytePacketBuffer) -> anyhow::Result<DnsPacket> {
+    fn from_buffer(buffer: &mut BytePacketBuffer) -> anyhow::Result<DnsPacket> {
         let mut result = DnsPacket::new();
         result.header.read(buffer)?;
 
@@ -652,7 +652,7 @@ impl DnsPacket {
         Ok(result)
     }
 
-    pub fn write(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
+    fn write(&mut self, buffer: &mut BytePacketBuffer) -> anyhow::Result<()> {
         self.header.questions = self.questions.len() as u16;
         self.header.answers = self.answers.len() as u16;
         self.header.authoritative_entries = self.authorities.len() as u16;
@@ -679,7 +679,7 @@ impl DnsPacket {
         Ok(())
     }
 
-    pub fn get_random_a(&self) -> Option<Ipv4Addr> {
+    fn get_random_a(&self) -> Option<Ipv4Addr> {
         self.answers.iter().find_map(|record| match record {
             DnsRecord::A { addr, .. } => Some(*addr),
             _ => None,
@@ -696,7 +696,7 @@ impl DnsPacket {
             .filter(move |(domain, _)| qname.ends_with(*domain))
     }
 
-    pub fn get_resolved_ns(&self, qname: &str) -> Option<Ipv4Addr> {
+    fn get_resolved_ns(&self, qname: &str) -> Option<Ipv4Addr> {
         self.get_ns(qname)
             .flat_map(|(_, host)| {
                 self.resources
@@ -710,7 +710,113 @@ impl DnsPacket {
             .next()
     }
 
-    pub fn get_unresolved_ns<'a>(&'a self, qname: &'a str) -> Option<&'a str> {
+    fn get_unresolved_ns<'a>(&'a self, qname: &'a str) -> Option<&'a str> {
         self.get_ns(qname).map(|(_, host)| host).next()
     }
+}
+
+fn recursive_lookup(qname: &str, qtype: QueryType) -> anyhow::Result<DnsPacket> {
+    let mut ns = "198.41.0.4".parse::<Ipv4Addr>().unwrap();
+
+    loop {
+        println!("Attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
+
+        let ns_copy = ns;
+
+        let server = (ns_copy, 53);
+        let response = lookup(qname, qtype, server)?;
+
+        if !response.answers.is_empty() && response.header.rescode == ResultCode::NoError {
+            return Ok(response);
+        }
+
+        if response.header.rescode == ResultCode::NxDomain {
+            return Ok(response);
+        }
+
+        if let Some(new_ns) = response.get_resolved_ns(qname) {
+            ns = new_ns;
+            continue;
+        }
+
+        let new_ns = match response.get_unresolved_ns(qname) {
+            Some(ns) => ns,
+            None => return Ok(response),
+        };
+        let recursive_response = recursive_lookup(new_ns, QueryType::A)?;
+
+        if let Some(new_ns) = recursive_response.get_random_a() {
+            ns = new_ns;
+        } else {
+            return Ok(response);
+        }
+    }
+}
+
+fn lookup(qname: &str, qtype: QueryType, server: (Ipv4Addr, u16)) -> anyhow::Result<DnsPacket> {
+    let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
+
+    let mut req_packet = DnsPacket::new();
+    req_packet.header.id = 6666;
+    req_packet.header.questions = 1;
+    req_packet.header.recursion_desired = true;
+    req_packet
+        .questions
+        .push(DnsQuestion::new(qname.to_string(), qtype));
+
+    let mut req_buffer = BytePacketBuffer::new();
+    req_packet.write(&mut req_buffer)?;
+    socket.send_to(&req_buffer.buffer[0..req_buffer.position], server)?;
+
+    let mut res_buffer = BytePacketBuffer::new();
+    socket.recv_from(&mut res_buffer.buffer)?;
+
+    DnsPacket::from_buffer(&mut res_buffer)
+}
+
+pub fn handle_query(socket: &UdpSocket) -> anyhow::Result<()> {
+    let mut req_buffer = BytePacketBuffer::new();
+    let (_, src) = socket.recv_from(&mut req_buffer.buffer)?;
+    let mut req_packet = DnsPacket::from_buffer(&mut req_buffer)?;
+
+    let mut res_packet = DnsPacket::new();
+    res_packet.header.id = req_packet.header.id;
+    res_packet.header.recursion_desired = true;
+    res_packet.header.recursion_available = true;
+    res_packet.header.response = true;
+
+    if let Some(question) = req_packet.questions.pop() {
+        println!("Received query: {:?}", question);
+
+        if let Ok(result) = recursive_lookup(&question.name, question.qtype) {
+            res_packet.questions.push(question);
+            res_packet.header.rescode = result.header.rescode;
+
+            for record in result.answers {
+                println!("Answer: {:?}", record);
+                res_packet.answers.push(record);
+            }
+
+            for record in result.authorities {
+                println!("Authority: {:?}", record);
+                res_packet.authorities.push(record);
+            }
+
+            for record in result.resources {
+                println!("Resource: {:?}", record);
+                res_packet.resources.push(record);
+            }
+        } else {
+            res_packet.header.rescode = ResultCode::ServFail;
+        }
+    } else {
+        res_packet.header.rescode = ResultCode::FormErr;
+    }
+
+    let mut res_buffer = BytePacketBuffer::new();
+    res_packet.write(&mut res_buffer)?;
+    let data = res_buffer.get_range(0, res_buffer.position)?;
+    socket.send_to(data, src)?;
+
+    Ok(())
 }
